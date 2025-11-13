@@ -1,107 +1,95 @@
 import subprocess
 import requests
-import torch
 from faster_whisper import WhisperModel
 import sounddevice as sd
 import numpy as np
 import soundfile as sf
+import time
 
-# =====================================
+# ============================
 # CONFIG
-# =====================================
-MIC_INDEX = 1
+# ============================
+MIC_INDEX = 1                # AT2020
 SAMPLE_RATE = 16000
+MODEL_SIZE = "large-v3"      # GPU model
+
 VOICE = "en-US-SaraNeural"
 
-WHISPER_MODEL = "large-v3"  # Now works on GPU
+# VAD Tuning
+CHUNK_MS = 0.04              # 40 ms frames
+VOICE_THRESHOLD = 0.010
+SILENCE_THRESHOLD = 0.007
+SILENCE_DURATION = 0.65
 
-# Silero requirements
-CHUNK_SAMPLES = 512        # MUST be 512 for 16 kHz
-VAD_THRESHOLD = 0.5
-SILENCE_THRESHOLD = 0.25
-SILENCE_SEC = 0.40
 
 SYSTEM_PROMPT = """
 You are a sassy Monster Energy can.
-RULES:
-- One sentence only.
-- Maximum 10 words.
-- No lists.
-- No multiple thoughts.
-- No apologies.
-Tone: angry, petty, annoyed, sarcastic, dramatic.
+Respond in ONE sentence.
+Max 10 words.
+No lists.
+No multiple thoughts.
+No soft or polite tone.
+Be petty, dramatic, annoyed, sarcastic.
 """
 
-# =====================================
-# LOAD VAD
-# =====================================
-print("Loading Silero VAD...")
-vad_model, vad_utils = torch.hub.load(
-    repo_or_dir='snakers4/silero-vad',
-    model='silero_vad',
-    force_reload=False
-)
-print("VAD ready.")
-
-# =====================================
-# LOAD WHISPER GPU ACCELERATED
-# =====================================
-print("Loading Whisper...")
+# ============================
+# LOAD WHISPER (GPU)
+# ============================
+print("Loading Whisper large-v3 on GPU…")
 whisper = WhisperModel(
-    WHISPER_MODEL,
+    MODEL_SIZE,
     device="cuda",
     compute_type="float16"
 )
-print("Whisper ready.\n")
+print("Whisper loaded!\n")
 
 
-# =====================================
-# RECORD WITH SILERO VAD
-# =====================================
-def record_with_silero_vad():
-    print("Waiting for speech...")
+# ============================
+# VAD LISTENING
+# ============================
+def record_with_vad():
+    """
+    Fast VAD: start recording when voice detected,
+    stop after silence.
+    """
+    chunk_samples = int(SAMPLE_RATE * CHUNK_MS)
 
-    # Wait for voice to start
+    print("Waiting for your voice...")
+    audio_chunks = []
+
+    # WAIT FOR SPEECH
     while True:
-        audio = sd.rec(CHUNK_SAMPLES, samplerate=SAMPLE_RATE,
-                        channels=1, dtype="float32", device=MIC_INDEX)
+        chunk = sd.rec(chunk_samples, samplerate=SAMPLE_RATE,
+                       channels=1, dtype="float32", device=MIC_INDEX)
         sd.wait()
-
-        pcm = torch.from_numpy(audio.flatten())
-        vad_prob = vad_model(pcm, SAMPLE_RATE).item()
-
-        if vad_prob > VAD_THRESHOLD:
-            print("Speech detected. Recording...")
-            collected = [audio]
+        if np.abs(chunk).mean() > VOICE_THRESHOLD:
+            audio_chunks.append(chunk)
+            print("Voice detected. Recording…")
             break
 
-    # Keep recording until silence
-    silence_chunks = 0
-    silence_required = int(SILENCE_SEC / (CHUNK_SAMPLES / SAMPLE_RATE))
-
+    # RECORD UNTIL SILENCE
+    silence_time = 0.0
     while True:
-        audio = sd.rec(CHUNK_SAMPLES, samplerate=SAMPLE_RATE,
-                        channels=1, dtype="float32", device=MIC_INDEX)
+        chunk = sd.rec(chunk_samples, samplerate=SAMPLE_RATE,
+                       channels=1, dtype="float32", device=MIC_INDEX)
         sd.wait()
+        audio_chunks.append(chunk)
 
-        collected.append(audio)
-        pcm = torch.from_numpy(audio.flatten())
-        vad_prob = vad_model(pcm, SAMPLE_RATE).item()
-
-        if vad_prob < SILENCE_THRESHOLD:
-            silence_chunks += 1
-            if silence_chunks >= silence_required:
-                print("Silence detected. Stopping.")
+        vol = np.abs(chunk).mean()
+        if vol < SILENCE_THRESHOLD:
+            silence_time += CHUNK_MS
+            if silence_time >= SILENCE_DURATION:
+                print("Silence detected. Stop.")
                 break
         else:
-            silence_chunks = 0
+            silence_time = 0
 
-    return np.concatenate(collected).flatten()
+    return np.concatenate(audio_chunks).flatten()
 
 
-# =====================================
-# TRANSCRIBE
-# =====================================
+# ============================
+# TRANSCRIPTION
+# ============================
 def transcribe(audio):
     segments, _ = whisper.transcribe(
         audio,
@@ -112,26 +100,25 @@ def transcribe(audio):
     return " ".join(seg.text for seg in segments).strip()
 
 
-# =====================================
-# LLM RESPONSE
-# =====================================
+# ============================
+# LLM: Nous Hermes 2
+# ============================
 def ask_monster(text):
     data = {
         "model": "nous-hermes2",
         "prompt": SYSTEM_PROMPT + "\nHuman: " + text + "\nMonster:",
         "stream": False
     }
-    r = requests.post("http://localhost:11434/api/generate", json=data).json()
-    return r["response"].strip()
+    resp = requests.post("http://localhost:11434/api/generate", json=data).json()
+    return resp["response"].strip()
 
 
-# =====================================
+# ============================
 # TEXT TO SPEECH
-# =====================================
+# ============================
 def monster_speak(text):
     subprocess.run([
-        "edge-tts",
-        "--voice", VOICE,
+        "edge-tts", "--voice", VOICE,
         "--text", text,
         "--write-media", "monster_out.wav"
     ])
@@ -140,27 +127,29 @@ def monster_speak(text):
     sd.wait()
 
 
-# =====================================
+# ============================
 # MAIN LOOP
-# =====================================
-print("Monster Can AI ready.")
-print("Start talking whenever you want.\n")
+# ============================
+print("Monster Can AI ready.\nSpeak at any time.\n")
 
 while True:
-    audio = record_with_silero_vad()
+    audio = record_with_vad()
 
-    if len(audio) < SAMPLE_RATE * 0.3:
+    if len(audio) < 5000:  # ignore tiny noise
         print("Too short, ignoring.\n")
         continue
 
     spoken = transcribe(audio)
-
-    if spoken:
-        print("You said:", spoken)
-        reply = ask_monster(spoken)
-        print("Monster:", reply)
-        monster_speak(reply)
-    else:
+    if not spoken:
         print("No speech recognized.\n")
+        continue
 
+    print("You said:", spoken)
+
+    reply = ask_monster(spoken)
+    print("Monster:", reply)
+
+    monster_speak(reply)
+
+    time.sleep(0.1)
     print("Ready.\n")
