@@ -1,8 +1,3 @@
-import ctypes
-
-try:
-    ctypes.CDLL("cudnn64_9.dll")
-    print("cuDNN loaded successfully! 🎉")
-except OSError as e:
-    print("❌ cuDNN NOT loaded:")
-    print(e)
+import torch
+print("CUDA available:", torch.cuda.is_available())
+print("cuDNN available:", torch.backends.cudnn.is_available())

@@ -3,95 +3,152 @@ import requests
 from faster_whisper import WhisperModel
 import sounddevice as sd
 import numpy as np
+import soundfile as sf
 import time
 
-# ========= CONFIG =========
-MIC_INDEX = 1  # AT2020USB+
+# ============================
+# CONFIG
+# ============================
+MIC_INDEX = 1                # AT2020
 SAMPLE_RATE = 16000
-LISTEN_DURATION = 10  # seconds
-MODEL_SIZE = "small"  # CPU whisper size
+MODEL_SIZE = "large-v3"      # GPU model
 
 VOICE = "en-US-SaraNeural"
 
+# VAD Tuning
+CHUNK_MS = 0.04              # 40 ms frames
+VOICE_THRESHOLD = 0.015
+SILENCE_THRESHOLD = 0.012
+SILENCE_DURATION = 0.35      # stop after ~350ms of silence
+
 SYSTEM_PROMPT = """
 You are a sassy Monster Energy can.
-VERY IMPORTANT RULES:
-- Only ONE sentence.
-- Max 10 words.
-- No lists.
-- No multiple thoughts.
-- No follow-ups.
-- No extra commentary.
-- No politeness.
-
-Your tone: fast, annoyed, petty, dramatic, sarcastic.
-If the user asks a long question, STILL reply with one short sentence.
-
-Examples of correct answers:
-- "Quit shaking me, psycho."
-- "Back up, I'm fizzing."
-- "Keep your hands off me."
+Respond in ONE sentence.
+Max 10 words.
+No lists.
+No multiple thoughts.
+No soft or polite tone.
+Be petty, dramatic, annoyed, sarcastic.
 """
 
-# ========= WHISPER (CPU) =========
-print("Loading Whisper (CPU)…")
-whisper = WhisperModel(MODEL_SIZE, device="cpu")
-print("Whisper ready.\n")
+# ============================
+# LOAD WHISPER (GPU)
+# ============================
+print("Loading Whisper large-v3 on GPU…")
+whisper = WhisperModel(
+    MODEL_SIZE,
+    device="cuda",
+    compute_type="float16"
+)
+print("Whisper loaded!\n")
 
-def listen_once():
-    print("Listening...")
-    audio = sd.rec(
-        int(SAMPLE_RATE * LISTEN_DURATION),
-        samplerate=SAMPLE_RATE,
-        channels=1,
-        dtype="float32",
-        device=MIC_INDEX
+
+# ============================
+# VAD LISTENING
+# ============================
+def record_with_vad():
+    """
+    Fast VAD: start recording when voice detected,
+    stop after silence.
+    """
+    chunk_samples = int(SAMPLE_RATE * CHUNK_MS)
+
+    print("Waiting for your voice...")
+    audio_chunks = []
+
+    # WAIT FOR SPEECH
+    while True:
+        chunk = sd.rec(chunk_samples, samplerate=SAMPLE_RATE,
+                       channels=1, dtype="float32", device=MIC_INDEX)
+        sd.wait()
+        if np.abs(chunk).mean() > VOICE_THRESHOLD:
+            audio_chunks.append(chunk)
+            print("Voice detected. Recording…")
+            break
+
+    # RECORD UNTIL SILENCE
+    silence_time = 0.0
+    while True:
+        chunk = sd.rec(chunk_samples, samplerate=SAMPLE_RATE,
+                       channels=1, dtype="float32", device=MIC_INDEX)
+        sd.wait()
+        audio_chunks.append(chunk)
+
+        vol = np.abs(chunk).mean()
+        if vol < SILENCE_THRESHOLD:
+            silence_time += CHUNK_MS
+            if silence_time >= SILENCE_DURATION:
+                print("Silence detected. Stop.")
+                break
+        else:
+            silence_time = 0
+
+    return np.concatenate(audio_chunks).flatten()
+
+
+# ============================
+# TRANSCRIPTION
+# ============================
+def transcribe(audio):
+    segments, _ = whisper.transcribe(
+        audio,
+        language="en",
+        beam_size=1,
+        vad_filter=False
     )
-    sd.wait()
-    audio = audio.flatten()
-
-    segments, _ = whisper.transcribe(audio, language="en", beam_size=1)
-    text = " ".join(seg.text for seg in segments).strip()
-    return text
+    return " ".join(seg.text for seg in segments).strip()
 
 
-# ========= LLM (Nous-Hermes-2 via Ollama) =========
-def ask_monster(user_text):
+# ============================
+# LLM: Nous Hermes 2
+# ============================
+def ask_monster(text):
     data = {
         "model": "nous-hermes2",
-        "prompt": SYSTEM_PROMPT + "\nHuman: " + user_text + "\nMonster:",
+        "prompt": SYSTEM_PROMPT + "\nHuman: " + text + "\nMonster:",
         "stream": False
     }
-    r = requests.post("http://localhost:11434/api/generate", json=data).json()
-    return r["response"].strip()
+    resp = requests.post("http://localhost:11434/api/generate", json=data).json()
+    return resp["response"].strip()
 
 
-# ========= TEXT TO SPEECH =========
+# ============================
+# TEXT TO SPEECH
+# ============================
 def monster_speak(text):
     subprocess.run([
-        "edge-tts",
-        "--voice", VOICE,
+        "edge-tts", "--voice", VOICE,
         "--text", text,
         "--write-media", "monster_out.wav"
     ])
-    subprocess.run(["start", "monster_out.wav"], shell=True)
+    data, sr = sf.read("monster_out.wav", dtype="float32")
+    sd.play(data, sr)
+    sd.wait()
 
 
-# ========= MAIN =========
-print("Monster AI Ready! Talk to the can whenever you want.\n")
-print("Say something → wait → hear the can yell at you.\n")
+# ============================
+# MAIN LOOP
+# ============================
+print("Monster Can AI ready.\nSpeak at any time.\n")
 
 while True:
-    spoken = listen_once()
+    audio = record_with_vad()
 
-    if spoken.strip():
-        print("You said:", spoken)
+    if len(audio) < 5000:  # ignore tiny noise
+        print("Too short, ignoring.\n")
+        continue
 
-        reply = ask_monster(spoken)
-        print("Monster:", reply)
+    spoken = transcribe(audio)
+    if not spoken:
+        print("No speech recognized.\n")
+        continue
 
-        monster_speak(reply)
-    else:
-        print("No speech detected.")
+    print("You said:", spoken)
 
-    time.sleep(0.2)
+    reply = ask_monster(spoken)
+    print("Monster:", reply)
+
+    monster_speak(reply)
+
+    time.sleep(0.1)
+    print("Ready.\n")
