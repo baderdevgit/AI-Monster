@@ -8,19 +8,29 @@ import time
 # ========= CONFIG =========
 MIC_INDEX = 1  # AT2020USB+
 SAMPLE_RATE = 16000
-RECORD_SECONDS = 3
+LISTEN_DURATION = 10  # seconds
+MODEL_SIZE = "small"  # CPU whisper size
+
 VOICE = "en-US-SaraNeural"
-MODEL_SIZE = "small"
 
 SYSTEM_PROMPT = """
-You are a sassy 12oz Monster Energy can.
-RULES:
+You are a sassy Monster Energy can.
+VERY IMPORTANT RULES:
 - Only ONE sentence.
 - Max 10 words.
-- No lists or multiple thoughts.
+- No lists.
+- No multiple thoughts.
 - No follow-ups.
+- No extra commentary.
 - No politeness.
-Tone: fast, annoyed, petty, dramatic, sarcastic.
+
+Your tone: fast, annoyed, petty, dramatic, sarcastic.
+If the user asks a long question, STILL reply with one short sentence.
+
+Examples of correct answers:
+- "Quit shaking me, psycho."
+- "Back up, I'm fizzing."
+- "Keep your hands off me."
 """
 
 # ========= WHISPER (CPU) =========
@@ -28,35 +38,22 @@ print("Loading Whisper (CPU)…")
 whisper = WhisperModel(MODEL_SIZE, device="cpu")
 print("Whisper ready.\n")
 
-# ========= VOICE-ACTIVATED LISTENING =========
-def listen_until_speech(threshold=0.015, chunk_ms=100):
-    """
-    Wait silently until the user starts speaking.
-    Once speech is detected → record a full 3s clip.
-    """
-    chunk_samples = int(SAMPLE_RATE * (chunk_ms / 1000))
-
-    print("🎤 Waiting for your voice...")
-
-    while True:
-        data = sd.rec(chunk_samples, samplerate=SAMPLE_RATE,
-                      channels=1, dtype="float32", device=MIC_INDEX)
-        sd.wait()
-
-        volume = np.abs(data).mean()
-
-        if volume > threshold:
-            print("🎤 Voice detected! Recording...")
-            break
-
-    audio = sd.rec(int(SAMPLE_RATE * RECORD_SECONDS),
-                   samplerate=SAMPLE_RATE,
-                   channels=1,
-                   dtype="float32",
-                   device=MIC_INDEX)
+def listen_once():
+    print("Listening...")
+    audio = sd.rec(
+        int(SAMPLE_RATE * LISTEN_DURATION),
+        samplerate=SAMPLE_RATE,
+        channels=1,
+        dtype="float32",
+        device=MIC_INDEX
+    )
     sd.wait()
+    audio = audio.flatten()
 
-    return audio.flatten()
+    segments, _ = whisper.transcribe(audio, language="en", beam_size=1)
+    text = " ".join(seg.text for seg in segments).strip()
+    return text
+
 
 # ========= LLM (Nous-Hermes-2 via Ollama) =========
 def ask_monster(user_text):
@@ -68,6 +65,7 @@ def ask_monster(user_text):
     r = requests.post("http://localhost:11434/api/generate", json=data).json()
     return r["response"].strip()
 
+
 # ========= TEXT TO SPEECH =========
 def monster_speak(text):
     subprocess.run([
@@ -78,24 +76,22 @@ def monster_speak(text):
     ])
     subprocess.run(["start", "monster_out.wav"], shell=True)
 
-# ========= MAIN LOOP =========
+
+# ========= MAIN =========
 print("Monster AI Ready! Talk to the can whenever you want.\n")
+print("Say something → wait → hear the can yell at you.\n")
 
 while True:
-    # Wait for speech → record → transcribe
-    audio = listen_until_speech()
+    spoken = listen_once()
 
-    segments, _ = whisper.transcribe(audio, language="en", beam_size=1)
-    spoken = " ".join(seg.text for seg in segments).strip()
-
-    if spoken:
-        print("🗣 You said:", spoken)
+    if spoken.strip():
+        print("You said:", spoken)
 
         reply = ask_monster(spoken)
-        print("🟢 Monster:", reply)
+        print("Monster:", reply)
 
         monster_speak(reply)
     else:
-        print("(heard noise but no speech)")
+        print("No speech detected.")
 
     time.sleep(0.2)
