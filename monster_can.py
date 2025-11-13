@@ -11,7 +11,7 @@ import time
 # ============================
 MIC_INDEX = 1                # AT2020
 SAMPLE_RATE = 16000
-MODEL_SIZE = "large-v3"      # GPU model
+MODEL_SIZE = "medium"      # GPU model
 
 VOICE = "en-US-SaraNeural"
 
@@ -95,6 +95,8 @@ def transcribe(audio):
         audio,
         language="en",
         beam_size=1,
+        best_of=1,
+        patience=1,
         vad_filter=False
     )
     return " ".join(seg.text for seg in segments).strip()
