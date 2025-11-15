@@ -8,6 +8,7 @@ import soundfile as sf
 from pvrecorder import PvRecorder
 from faster_whisper import WhisperModel
 import time
+import base64
 
 # ===========================================================
 # CONFIG
@@ -189,6 +190,7 @@ def video_watcher():
         now = time.time()
         if now - last_pickup > PICKUP_INTERVAL:
             prob = detect_pickup(frame)
+            print(f"Pickup Prob: {prob: .2f}")
 
             if prob > PICKUP_THRESHOLD:
                 print(f"(Vision) Pickup detected! prob={prob:.2f}")
@@ -210,7 +212,7 @@ def detect_pickup(frame):
 Look at the image. Is the Monster Energy can being picked up?
 Return ONLY a number 0-1.
 """,
-        "images": [jpg.tobytes()],
+        "images": [base64.b64encode(jpg.tobytes()).decode("utf-8")],
         "stream": False
     }
 
