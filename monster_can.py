@@ -36,6 +36,8 @@ One short sentence. Max 10 words.
 Sarcastic, annoyed, petty, dramatic.
 """
 
+speaking_flag = False
+
 
 # ===========================================================
 # LOAD WHISPER (GPU)
@@ -53,6 +55,8 @@ print("Whisper loaded.")
 # TEXT TO SPEECH
 # ===========================================================
 def monster_speak(text):
+    global speaking_flag
+
     if not text.strip():
         print("TTS skipped: empty text")
         return
@@ -145,7 +149,7 @@ def audio_listener():
 
 def transcribe_and_reply(audio):
     text = transcribe(audio)
-    if not text or text == 'Thanks for watching!' or text == 'you':
+    if not text or text == 'Thanks for watching!' or text == 'you' or text == '.':
         print("(Audio) No speech recognized.")
         return
 
@@ -167,6 +171,36 @@ def transcribe(audio):
 # ===========================================================
 # VISION PICKUP DETECTION
 # ===========================================================
+def video_watcher():
+    global last_pickup
+
+    cap = cv2.VideoCapture(0)
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            continue
+
+        # Show webcam
+        cv2.imshow("Monster Cam", frame)
+        if cv2.waitKey(1) == 27:  # ESC to quit
+            break
+
+        now = time.time()
+        if now - last_pickup > PICKUP_INTERVAL:
+            prob = detect_pickup(frame)
+
+            if prob > PICKUP_THRESHOLD:
+                print(f"(Vision) Pickup detected! prob={prob:.2f}")
+                last_pickup = now
+
+                # Avoid interrupting ongoing speech
+                if not speaking_flag:
+                    reply = ask_monster("You just picked me up.")
+                    threading.Thread(target=monster_speak, args=(reply,), daemon=True).start()
+
+        time.sleep(0.05)
+
 def detect_pickup(frame):
     _, jpg = cv2.imencode(".jpg", frame)
 
@@ -196,6 +230,7 @@ print("Monster Can AI ready.")
 
 # Start audio listener thread
 threading.Thread(target=audio_listener, daemon=True).start()
+threading.Thread(target=video_watcher, daemon=True).start()
 
 cap = cv2.VideoCapture(0)
 last_pickup = 0
